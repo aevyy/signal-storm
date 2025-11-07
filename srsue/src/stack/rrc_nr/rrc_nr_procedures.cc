@@ -191,6 +191,7 @@ proc_outcome_t rrc_nr::setup_request_proc::init(srsran::nr_establishment_cause_t
 {
   cause              = cause_;
   dedicated_info_nas = std::move(dedicated_info_nas_);
+  srsran::console("[SSTORM] [SETUP-REQ] init() called with cause_=%d, stored cause=%d\n", (int)cause_, (int)cause);
 
   if (!rrc_handle.plmn_is_selected) {
     Error("Trying to connect but PLMN not selected.");
@@ -237,6 +238,7 @@ proc_outcome_t rrc_nr::setup_request_proc::step()
 
   if (state == state_t::config_serving_cell) {
     srsran::console("[SSTORM] [SETUP-REQ] configuring cell, starting T300 and sending request...\n");
+    srsran::console("[SSTORM] [SETUP-REQ] step() using cause=%d\n", (int)cause);
     
     // TODO: start serving cell config and start T300
 

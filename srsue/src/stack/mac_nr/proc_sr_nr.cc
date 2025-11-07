@@ -50,6 +50,9 @@ void proc_sr_nr::reset()
 void proc_sr_nr::reset_nolock()
 {
   is_pending_sr = false;
+  // !VI
+  sr_counter = 0; // CRITIXAL: Reset counter to prevent immediate SR failure on new connection
+  srsran::console("[SSTORM] [PROC_SR_NR] Reset: counter=0, pending=false\n");
 }
 
 int32_t proc_sr_nr::set_config(const srsran::sr_cfg_nr_t& cfg_)
@@ -105,9 +108,29 @@ void proc_sr_nr::step(uint32_t tti)
   // 1> if the MAC entity has no valid PUCCH resource configured for the pending SR:
   if (not phy->has_valid_sr_resource(cfg.item[0].sched_request_id)) {
     // 2> initiate a Random Access procedure (see clause 5.1) on the SpCell and cancel the pending SR.
+
+    // !VI - FIX: Only start RACH if one isnt already  running
+    // This fixed the race condition whre SSR procedure flooded PHY with RACH requests
+    // every TTI while waiting for the first RACH to complete
+    if (!mac->is_ra_running()) {
+      srsran::console("[SSTORM] [PROC_SR_NR] PUCCH not configured (counter=%d), starting RA...\n", sr_counter);
+      mac->start_ra();
+
+      // Cancel the pending SR
+      is_pending_sr = false;
+      sr_counter = 0;
+    } else {
+      // RACH IS ALREADY IN PROGRESS - dont start another one
+      // kep is_pending_sr = true so that start() won't be called again
+      // (start() has a guard that only runs if is_pending_sr = false)
+      srsran::console("[SSTORM] [PROC_SR_NR] PUCCH not configured, but RACH is already in progress. WAITING.\n");
+    }
+
     logger.info("SR:    PUCCH not configured. Starting RA procedure");
-    mac->start_ra();
-    reset_nolock();
+
+    // !vi - remove duplicates
+    // mac->start_ra();
+    // reset_nolock();
     return;
   }
 

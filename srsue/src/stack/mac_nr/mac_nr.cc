@@ -20,6 +20,7 @@
  */
 
 #include "srsue/hdr/stack/mac_nr/mac_nr.h"
+#include "srsran/common/standard_streams.h"
 #include "srsran/interfaces/ue_rlc_interfaces.h"
 #include "srsran/interfaces/ue_rrc_interfaces.h"
 #include "srsran/mac/mac_rar_pdu_nr.h"
@@ -106,6 +107,8 @@ void mac_nr::stop()
 void mac_nr::reset()
 {
   logger.info("Resetting MAC-NR");
+  // !VI - reset
+  srsran::console("[SSTORM] [MAC] Resetting: clearing SR, BSR, RA, HARQ, RNTIs\n");
 
   // TODO: Implement all the steps in 5.9
   proc_bsr.reset();
@@ -122,6 +125,20 @@ void mac_nr::reset()
       cc->reset();
     }
   }
+
+  // !vi - log clear rntis
+  // Ensure all RNTIs and contention IDs are cleared so we don't keep using
+  // stale identities after a forced detach/reset (prevents "split-brain" state)
+  uint16_t old_crnti = rntis.get_crnti();
+  rntis.clear_crnti();
+  rntis.clear_temp_rnti();
+  rntis.clear_rar_rnti();
+  rntis.set_contention_id(0);
+  srsran::console("[SSTORM] [MAC] Cleared RNTIs: old_crnti=0x%04x\n", old_crnti);
+
+  // Stop any pending BCCH search activity until explicitly re-enabled
+  search_bcch = false;
+  srsran::console("[SSTORM] [MAC] Reset complete\n");
 }
 
 void mac_nr::run_tti(const uint32_t tti)

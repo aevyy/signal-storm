@@ -107,6 +107,8 @@ public:
 
   /// procedure sr nr interface
   void start_ra() { proc_ra.start_by_mac(); }
+  // !VI
+  bool is_ra_running() { return proc_ra.is_running(); };
 
   /// Interface for MUX
   srsran::mac_sch_subpdu_nr::lcg_bsr_t generate_sbsr();
