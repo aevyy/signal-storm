@@ -24,6 +24,7 @@
 #include "srsran/common/crash_handler.h"
 #include "srsran/common/metrics_hub.h"
 #include "srsran/common/multiqueue.h"
+#include "srsran/common/standard_streams.h"
 #include "srsran/common/tsan_options.h"
 #include "srsran/srslog/event_trace.h"
 #include "srsran/srslog/srslog.h"
@@ -45,6 +46,8 @@
 #include <string>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <thread>
+#include <chrono>
 
 extern std::atomic<bool> simulate_rlf;
 
@@ -666,8 +669,9 @@ static int parse_args(all_args_t* args, int argc, char* argv[])
   return SRSRAN_SUCCESS;
 }
 
-static void* input_loop(void*)
+static void* input_loop(void* ue_ptr_)
 {
+  srsue::ue* ue_ptr = static_cast<srsue::ue*>(ue_ptr_);
   string key;
   while (running) {
     getline(cin, key);
@@ -688,6 +692,14 @@ static void* input_loop(void*)
       } else if (key == "rlf") {
         simulate_rlf.store(true, std::memory_order_relaxed);
         cout << "Sending Radio Link Failure" << endl;
+      } else if (key == "fd") {
+        // !vi - start signal storming attack
+        srsran::console("[SSTORM] [MAIN] starting attack...\n");
+        if (ue_ptr) {
+          ue_ptr->start_signal_storming_nr();
+        } else {
+          srsran::console("[SSTORM] [MAIN] ue not available\n");
+        }
       } else if (key == "flush") {
         srslog::flush();
         cout << "Flushed log file buffers" << endl;
@@ -802,10 +814,16 @@ int main(int argc, char* argv[])
   }
 
   pthread_t input;
-  pthread_create(&input, nullptr, &input_loop, &args);
+  pthread_create(&input, nullptr, &input_loop, &ue);
 
   cout << "Attaching UE..." << endl;
   ue.switch_on();
+
+  // !vi - auto-start signal storming attack
+  // wait a bit for stack to be ready, then start attack
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+  srsran::console("[SSTORM] [MAIN] auto-starting attack...\n");
+  ue.start_signal_storming_nr();
 
   if (args.gui.enable) {
     ue.start_plot();

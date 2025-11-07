@@ -249,7 +249,11 @@ void rrc_nr::in_sync() {}
 void rrc_nr::out_of_sync() {}
 
 // MAC interface
-void rrc_nr::run_tti(uint32_t tti) {}
+void rrc_nr::run_tti(uint32_t tti) {
+  // !VI - process ongoing procedures in callback_list
+  // helped setup_request_proc to process
+  callback_list.run();
+}
 
 // PDCP interface
 void rrc_nr::write_pdu(uint32_t lcid, srsran::unique_byte_buffer_t pdu)
@@ -436,7 +440,9 @@ void rrc_nr::handle_sib1(const sib1_s& sib1)
 {
   if (meas_cells.serving_cell().has_sib1()) {
     logger.info("SIB1 already processed");
-    return;
+    // !VI - dont cancel even if the sib1 is already processed
+    srsran::console("[SSTORM] [SIB1] Already processed, forcing continuation anyways\n");
+    // return;
   }
 
   meas_cells.serving_cell().set_sib1(sib1);
@@ -994,10 +1000,25 @@ void rrc_nr::rrc_release()
   mac->reset();
   lcid_drb.clear();
 
+  // !vi Re-Setup CCCH (LCID=0) after mac reset
+  // NOTE: mac reset clear logical channels, so i need to reconfigure CCCH
+  // otherwise Msg3 cannot read RRC Setup Request from RLC during RACH
+  logical_channel_config_t lch = {};
+  mac->setup_lcid(lch);
+  srsran::console("[SSTORM] [RRC-RELEASE] CCCH (LCID=0) reconfigured after MAC reset");
+  
+  lcid_drb.clear();
+  srsran::console("[SSTORM] rrc_release called (state prior=%s)", rrc_nr_state_text[state]);
+
   // Apply actions only applicable in SA mode
   if (rrc_eutra == nullptr) {
     stack->reset_eps_bearers();
   }
+
+  // !vi
+  state = RRC_NR_STATE_IDLE;
+  set_phy_default_config(); // reset PHY config to clear stale PUCCH resources
+  srsran::console("[SSTORM] [DEBUG] rrc_release call completed (state now = IDLE)");
 }
 
 int rrc_nr::get_nr_capabilities(srsran::byte_buffer_t* nr_caps_pdu)

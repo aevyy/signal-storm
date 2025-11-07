@@ -21,6 +21,9 @@
 
 #include "srsue/hdr/stack/rrc_nr/rrc_nr_procedures.h"
 #include "srsran/common/standard_streams.h"
+#include <random>
+#include <ctime>
+#include <thread>
 
 #define Error(fmt, ...) rrc_handle.logger.error("Proc \"%s\" - " fmt, name(), ##__VA_ARGS__)
 #define Warning(fmt, ...) rrc_handle.logger.warning("Proc \"%s\" - " fmt, name(), ##__VA_ARGS__)
@@ -206,15 +209,21 @@ proc_outcome_t rrc_nr::setup_request_proc::init(srsran::nr_establishment_cause_t
   cell_search_ret = rrc_cell_search_result_t::no_cell;
 
   state = state_t::cell_selection;
-  if (rrc_handle.cell_selector.is_idle()) {
+  bool cell_sel_idle = rrc_handle.cell_selector.is_idle();
+  srsran::console("[SSTORM] [SETUP-REQ] starting cell selection (idle=%d)\n", cell_sel_idle);
+  
+  if (cell_sel_idle) {
     // No one is running cell selection
     if (not rrc_handle.cell_selector.launch()) {
       Error("Failed to initiate cell selection procedure...");
+      srsran::console("[SSTORM] [SETUP-REQ] cell selection launch failed, retrying later...\n");
       return proc_outcome_t::error;
     }
+    srsran::console("[SSTORM] [SETUP-REQ] cell selection started ok\n");
     rrc_handle.callback_list.add_proc(rrc_handle.cell_selector);
   } else {
     Info("Cell selection proc already on-going. Wait for its result");
+    srsran::console("[SSTORM] [SETUP-REQ] cell selection already running, waiting...\n");
   }
   return proc_outcome_t::yield;
 }
@@ -227,6 +236,8 @@ proc_outcome_t rrc_nr::setup_request_proc::step()
   }
 
   if (state == state_t::config_serving_cell) {
+    srsran::console("[SSTORM] [SETUP-REQ] configuring cell, starting T300 and sending request...\n");
+    
     // TODO: start serving cell config and start T300
 
     // start T300
@@ -234,6 +245,7 @@ proc_outcome_t rrc_nr::setup_request_proc::step()
 
     // Send setup request message to lower layers
     rrc_handle.send_setup_request(cause);
+    srsran::console("[SSTORM] [SETUP-REQ] RRC Setup Request sent (cause=%d)\n", (int)cause);
 
     // Save dedicatedInfoNAS SDU, if needed (TODO: this should be passed to procedure without temp storage)
     if (dedicated_info_nas.get()) {
@@ -254,16 +266,23 @@ proc_outcome_t rrc_nr::setup_request_proc::step()
 
   } else if (state == state_t::wait_t300) {
     // Wait until t300 stops due to RRCConnectionSetup/Reject or expiry
-    if (rrc_handle.t300.is_running()) {
+    bool t300_running = rrc_handle.t300.is_running();
+    bool is_connected = (rrc_handle.state == RRC_NR_STATE_CONNECTED);
+    
+    if (t300_running) {
       return proc_outcome_t::yield;
     }
 
-    if (rrc_handle.state == RRC_NR_STATE_CONNECTED) {
+    if (is_connected) {
       // Received ConnectionSetup
+      srsran::console("[SSTORM] [SETUP-REQ] got RRC Setup (Msg4)!\n");
       return proc_outcome_t::success;
+    } else {
+      srsran::console("[SSTORM] [SETUP-REQ] T300 stopped but not connected (timeout or reject?)\n");
     }
   }
 
+  srsran::console("[SSTORM] [SETUP-REQ] procedure failed (state=%d)\n", (int)state);
   return proc_outcome_t::error;
 }
 
@@ -273,22 +292,30 @@ void rrc_nr::setup_request_proc::then(const srsran::proc_state_t& result)
     logger.warning("Could not finish setup request. Deallocating dedicatedInfoNAS PDU");
     dedicated_info_nas.reset();
     rrc_handle.dedicated_info_nas.reset();
+
   } else {
     Info("Finished connection request procedure successfully.");
   }
+
   // TODO: signal back to NAS
   // rrc_handle.nas->connection_request_completed(result.is_success());
 }
 
 srsran::proc_outcome_t rrc_nr::setup_request_proc::react(const cell_selection_proc::cell_selection_complete_ev& e)
 {
+  bool is_success = e.is_success();
+  srsran::console("[SSTORM] [SETUP-REQ] cell selection done: %s\n", is_success ? "ok" : "failed");
+  
   if (state != state_t::cell_selection) {
     // ignore if we are not expecting an cell selection result
+    srsran::console("[SSTORM] [SETUP-REQ] not expecting cell selection result, ignoring\n");
     return proc_outcome_t::yield;
   }
   if (e.is_error()) {
+    srsran::console("[SSTORM] [SETUP-REQ] cell selection failed\n");
     return proc_outcome_t::error;
   }
+  
   cell_search_ret = *e.value();
   // .. and SI acquisition
   // TODO @ismagom use appropiate PHY interface
@@ -301,11 +328,16 @@ srsran::proc_outcome_t rrc_nr::setup_request_proc::react(const cell_selection_pr
     // timeAlignmentCommon applied in configure_serving_cell
 
     Info("Configuring serving cell...");
+    srsran::console("[SSTORM] [SETUP-REQ] cell selected, configuring serving cell now...\n");
     state = state_t::config_serving_cell;
 
     // Skip SI acquisition
     return step();
   }
+  
+  // If we reach here, something went wrong
+  srsran::console("[SSTORM] [SETUP-REQ] cell selection done but camping check failed\n");
+  return proc_outcome_t::error;
 }
 
 /******************************************
@@ -375,6 +407,8 @@ rrc_nr::cell_selection_proc::cell_selection_proc(rrc_nr& parent_) : rrc_handle(p
 proc_outcome_t rrc_nr::cell_selection_proc::init()
 {
   Info("Starting...");
+  srsran::console("[SSTORM] [CELL-SEL] starting cell search...\n");
+  
   state = state_t::phy_cell_search;
 
   // TODO: add full cell selection
@@ -385,11 +419,15 @@ proc_outcome_t rrc_nr::cell_selection_proc::init()
   cs_args.ssb_scs                                  = rrc_handle.phy_cfg.ssb.scs;
   cs_args.ssb_pattern                              = rrc_handle.phy_cfg.ssb.pattern;
   cs_args.duplex_mode                              = rrc_handle.phy_cfg.duplex.mode;
+
+  srsran::console("[SSTORM] [CELL-SEL] searching on freq=%.0f Hz\n", cs_args.center_freq_hz);
+
   if (not rrc_handle.phy->start_cell_search(cs_args)) {
     Error("Failed to initiate Cell Search.");
     return proc_outcome_t::error;
   }
 
+  srsran::console("[SSTORM] [CELL-SEL] cell search started ok\n");
   return proc_outcome_t::yield;
 }
 
@@ -503,13 +541,17 @@ rrc_nr::cell_selection_proc::handle_cell_search_result(const rrc_interface_phy_n
 
 proc_outcome_t rrc_nr::cell_selection_proc::react(const rrc_interface_phy_nr::cell_select_result_t& event)
 {
+  srsran::console("[SSTORM] [CELL-SEL] cell select result: status=%d\n", (int)event.status);
+  
   if (state != state_t::phy_cell_select) {
     Warning("Received unexpected cell select result");
+    srsran::console("[SSTORM] [CELL-SEL] unexpected event, ignoring\n");
     return proc_outcome_t::yield;
   }
 
   if (event.status != rrc_interface_phy_nr::cell_select_result_t::SUCCESSFUL) {
     Error("Couldn't select new serving cell");
+    srsran::console("[SSTORM] [CELL-SEL] cell select failed\n");
     phy_search_result.cell_found = false;
     rrc_search_result            = rrc_nr::rrc_cell_search_result_t::no_cell;
     return proc_outcome_t::error;
@@ -519,6 +561,7 @@ proc_outcome_t rrc_nr::cell_selection_proc::react(const rrc_interface_phy_nr::ce
 
   // PHY is now camping on serving cell
   Info("Cell selection completed. Starting SIB1 acquisition");
+  srsran::console("[SSTORM] [CELL-SEL] cell selected ok, getting SIB1 now...\n");
 
   // Transition to cell selection ignoring the cell search result
   state = state_t::sib_acquire;
@@ -528,12 +571,16 @@ proc_outcome_t rrc_nr::cell_selection_proc::react(const rrc_interface_phy_nr::ce
 
 proc_outcome_t rrc_nr::cell_selection_proc::react(const bool sib1_found)
 {
+  srsran::console("[SSTORM] [CELL-SEL] SIB1 result: %s\n", sib1_found ? "got it" : "not found");
+  
   if (state != state_t::sib_acquire) {
     Warning("Received unexpected cell select result");
+    srsran::console("[SSTORM] [CELL-SEL] unexpected event, ignoring\n");
     return proc_outcome_t::yield;
   }
 
   Info("SIB1 acquired successfully");
+  srsran::console("[SSTORM] [CELL-SEL] SIB1 got, cell selection done!\n");
   rrc_handle.mac->bcch_search(false);
 
   return proc_outcome_t::success;
@@ -541,8 +588,11 @@ proc_outcome_t rrc_nr::cell_selection_proc::react(const bool sib1_found)
 
 proc_outcome_t rrc_nr::cell_selection_proc::react(const rrc_interface_phy_nr::cell_search_result_t& event)
 {
+  srsran::console("[SSTORM] [CELL-SEL] cell search result: %s\n", event.cell_found ? "found cell" : "no cell");
+  
   if (state != state_t::phy_cell_search) {
     Error("Received unexpected cell search result");
+    srsran::console("[SSTORM] [CELL-SEL] unexpected event, error\n");
     return proc_outcome_t::error;
   }
   phy_search_result = event;
@@ -550,16 +600,22 @@ proc_outcome_t rrc_nr::cell_selection_proc::react(const rrc_interface_phy_nr::ce
   if (phy_search_result.cell_found) {
     return handle_cell_search_result(phy_search_result);
   }
+  srsran::console("[SSTORM] [CELL-SEL] no cell found, failed\n");
   return proc_outcome_t::error;
 }
 
 void rrc_nr::cell_selection_proc::then(const cell_selection_complete_ev& proc_result) const
 {
   Info("Completed with %s.", proc_result.is_success() ? "success" : "failure");
+  srsran::console("[SSTORM] [CELL-SEL] done: %s\n", proc_result.is_success() ? "ok" : "failed");
+  
   // Inform Connection Request Procedure
   rrc_handle.task_sched.defer_task([this, proc_result]() {
     if (rrc_handle.setup_req_proc.is_busy()) {
+      srsran::console("[SSTORM] [CELL-SEL] telling setup_req_proc that cell selection is done\n");
       rrc_handle.setup_req_proc.trigger(proc_result);
+    } else {
+      srsran::console("[SSTORM] [CELL-SEL] setup_req_proc not busy, can't tell it\n");
     }
   });
 }

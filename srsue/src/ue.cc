@@ -414,4 +414,15 @@ std::string ue::get_build_string()
   return ss.str();
 }
 
+void ue::start_signal_storming_nr()
+{
+  // !vi - Start storming
+  if (stack) {
+    ue_stack_lte* lte_stack = dynamic_cast<ue_stack_lte*>(stack.get());
+    if (lte_stack) {
+      lte_stack->sstorm_start();
+    }
+  }
+}
+
 } // namespace srsue

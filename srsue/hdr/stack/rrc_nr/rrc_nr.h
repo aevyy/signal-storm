@@ -73,7 +73,7 @@ public:
 
   // !vi - interface
   void sstorm_start();
-  bool is_attack_mode_active() { return sstorm_active; }
+  bool is_attack_mode_active() final { return sstorm_active; }
 
   // !vi - attack helpers
   void stop_all_rrc_timers();

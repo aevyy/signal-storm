@@ -110,6 +110,10 @@ public:
   bool get_metrics(ue_metrics_t* m);
 
   void radio_overflow();
+  
+  // !vi - Signal Storming
+  void start_signal_storming_nr();
+  void stop_signal_storming_nr();
 
 private:
   // UE consists of a radio, a PHY and a stack element
