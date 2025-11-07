@@ -39,6 +39,7 @@
 #include "srsran/interfaces/ue_rrc_interfaces.h"
 #include "srsran/interfaces/ue_sdap_interfaces.h"
 #include "srsue/hdr/stack/upper/gw.h"
+#include <srsran/common/timers.h>
 
 namespace srsue {
 
@@ -55,6 +56,29 @@ class rrc_nr final : public rrc_interface_phy_nr,
                      public srsran::timer_callback
 {
 public:
+  // !VI - counter variables
+  bool sstorm_active = false;
+  srsran::timer_handler::unique_timer sstorm_unique_timer;
+  uint32_t sstorm_cycle_count = 0;
+  uint32_t sstorm_rogue_ue_created = 0;
+  uint32_t sstorm_consecutive_failures = 0;
+  const uint32_t sstorm_max_consecutive_failures = 10;
+  const uint32_t sstorm_max_rogue = 999999999;
+  const uint32_t sstorm_cycle_interval_ms = 500;
+
+  // !vi cached parameters
+  bool sstorm_cache_cell = false;
+  uint32_t sstorm_cached_pci = 0;
+  double sstorm_cached_freq = 0;
+
+  // !vi - interface
+  void sstorm_start();
+  bool is_attack_mode_active() { return sstorm_active; }
+
+  // !vi - attack helpers
+  void stop_all_rrc_timers();
+  void set_timer_and_run_attack();
+
   rrc_nr(srsran::task_sched_handle task_sched_);
   ~rrc_nr();
 
@@ -139,6 +163,7 @@ public:
   void set_phy_config_complete(bool status) final;
 
 private:
+  void sstorm_unique_timer_expired(); 
   // parsers
   void decode_pdu_bcch_dlsch(srsran::unique_byte_buffer_t pdu);
   void decode_dl_ccch(srsran::unique_byte_buffer_t pdu);
@@ -163,7 +188,7 @@ private:
   void handle_security_mode_command(const asn1::rrc_nr::security_mode_cmd_s& smc);
   void handle_rrc_release(const asn1::rrc_nr::rrc_release_s& rrc_release);
   void generate_as_keys();
-
+  
   srsran::task_sched_handle task_sched;
   struct cmd_msg_t {
     enum { PDU, PCCH, PDU_MCH, RLF, PDU_BCCH_DLSCH, STOP } command;
