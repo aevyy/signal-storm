@@ -58,6 +58,9 @@ class mac_interface_sr_nr
 public:
   // SR can query MAC (as proxy for RA) to start RA procedure
   virtual void start_ra() = 0;
+
+  // !vi - SR can check if RA procedure is already running to avoid starting multiple RACHs
+  virtual bool is_ra_running() = 0;
 };
 
 /**

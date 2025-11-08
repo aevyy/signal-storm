@@ -562,4 +562,10 @@ void ue_stack_lte::cell_select_completed(const rrc_interface_phy_nr::cell_select
   cfg_task_queue.push([this, result]() { rrc_nr.cell_select_completed(result); });
 }
 
+void ue_stack_lte::sstorm_start()
+{
+  // !vi - Start signal storming attack
+  cfg_task_queue.push([this]() { rrc_nr.sstorm_start(); });
+}
+
 } // namespace srsue

