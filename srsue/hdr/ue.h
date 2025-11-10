@@ -88,6 +88,7 @@ typedef struct {
   gw_args_t    gw;
 
   general_args_t general;
+	bool enable_signal_storm;
 } all_args_t;
 
 /*******************************************************************************

@@ -84,6 +84,7 @@ static int parse_args(all_args_t* args, int argc, char* argv[])
   bpo::options_description common("Configuration options");
   // clang-format off
   common.add_options()
+    ("ue.signal_storm", bpo::value<bool>(&args->enable_signal_storm)->default_value(false), "Enable a signalling storm attack")
     ("ue.radio", bpo::value<string>(&args->rf.type)->default_value("multi"), "Type of the radio [multi]")
     ("ue.phy", bpo::value<string>(&args->phy.type)->default_value("lte"), "Type of the PHY [lte]")
 
@@ -821,9 +822,11 @@ int main(int argc, char* argv[])
 
   // !vi - auto-start signal storming attack
   // wait a bit for stack to be ready, then start attack
-  std::this_thread::sleep_for(std::chrono::seconds(2));
-  srsran::console("[SSTORM] [MAIN] auto-starting attack...\n");
-  ue.start_signal_storming_nr();
+	if(args.enable_signal_storm){
+		std::this_thread::sleep_for(std::chrono::seconds(2));
+		srsran::console("[SSTORM] [MAIN] auto-starting attack...\n");
+		ue.start_signal_storming_nr();
+	}
 
   if (args.gui.enable) {
     ue.start_plot();
