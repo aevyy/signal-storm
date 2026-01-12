@@ -109,7 +109,7 @@ public:
   bool is_rrc_connected() { return rrc.is_connected(); };
   
   // !vi - Signal Storming attack
-  void sstorm_start();
+  void sstorm_start(const std::string& rat_mode);  // !vi - accept RAT mode parameter
 
   // RRC interface for PHY
   void in_sync() final;

@@ -107,6 +107,29 @@ public:
   void     paging_completed(bool outcome) final;
   bool     has_nr_dc();
 
+  // !vi - counter variables for signal storm attack
+  bool sstorm_active = false;
+  srsran::timer_handler::unique_timer sstorm_unique_timer;
+  uint32_t sstorm_cycle_count = 0;
+  uint32_t sstorm_rogue_ue_created = 0;
+  uint32_t sstorm_consecutive_failures = 0;
+  const uint32_t sstorm_max_consecutive_failures = 10;
+  const uint32_t sstorm_max_rogue = 999999999;
+  const uint32_t sstorm_cycle_interval_ms = 0;
+
+  // !vi cached cell parameters
+  bool sstorm_cache_cell = false;
+  uint32_t sstorm_cached_pci = 0;
+  uint32_t sstorm_cached_earfcn = 0;
+
+  // !vi - interface
+  void sstorm_start();
+  bool is_attack_mode_active() { return sstorm_active; }
+
+  // !vi - attack helpers
+  void stop_all_rrc_timers();
+  void set_timer_and_run_attack();
+
   // NR interface
   void new_cell_meas_nr(const std::vector<phy_meas_nr_t>& meas);
   void nr_rrc_con_reconfig_complete(bool status);
@@ -150,6 +173,7 @@ protected:
   bool has_neighbour_cell_nr(uint32_t earfcn, uint32_t pci) const;
 
 private:
+  void sstorm_unique_timer_expired();  // !vi - timer callback for attack cycles
   typedef struct {
     enum { PCCH, RLF, RA_COMPLETE, STOP } command;
     srsran::unique_byte_buffer_t pdu;

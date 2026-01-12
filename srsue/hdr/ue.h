@@ -89,6 +89,7 @@ typedef struct {
 
   general_args_t general;
 	bool enable_signal_storm;
+	std::string signal_storm_rat;  // !vi - attack RAT mode: "nr" or "lte"
 } all_args_t;
 
 /*******************************************************************************

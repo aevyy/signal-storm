@@ -420,7 +420,7 @@ void ue::start_signal_storming_nr()
   if (stack) {
     ue_stack_lte* lte_stack = dynamic_cast<ue_stack_lte*>(stack.get());
     if (lte_stack) {
-      lte_stack->sstorm_start();
+      lte_stack->sstorm_start(args.signal_storm_rat);  // !vi - pass configured RAT mode
     }
   }
 }
